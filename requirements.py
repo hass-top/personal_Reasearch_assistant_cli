@@ -1,0 +1,10 @@
+rich
+pydantic
+python-dotenv
+requests
+langchain_ollama
+langchain_openai
+langchain_groq
+langgraph
+ddgs
+tavily-python
