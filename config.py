@@ -44,6 +44,61 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 
 # ---------------------------------------------------------------------------
+# Question understanding (Phase 1)
+# ---------------------------------------------------------------------------
+# Every question is understood once before the rest of the graph runs:
+#
+#   subject      = WHAT the question is about  (english / cybersecurity)
+#   topic        = the main thing asked about
+#   intent       = WHAT THE USER WANTS TO DO   (learn / practice / verify /
+#                                                research)
+#   task         = the specific operation requested (explain, solve, ...)
+#   ambiguous    = the request would search differently under another reading
+#   clarification= the question to ask back in that case
+#   clarification_options = 2-4 numbered readings the user can pick from
+#
+# The lists are intentionally short: small local models classify more
+# reliably against few options. Questions that fit neither subject fall
+# back to DEFAULT_SUBJECT ("general"). An ambiguous request is routed to
+# the `clarify` node instead of the planner, so no search runs until the
+# meaning is settled.
+
+SUBJECTS = ("english", "cybersecurity")
+INTENTS = ("learn", "practice", "verify", "research")
+
+# CLASSIFY=off skips the understanding call (state keeps the defaults).
+CLASSIFY_ENABLED = _bool_env("CLASSIFY", True)
+
+# Fallbacks when classification is off or the model replied nonsense.
+DEFAULT_SUBJECT = "general"
+DEFAULT_INTENT = "research"
+
+# STRUCTURED_OUTPUT=off asks for JSON in the prompt only. The provider then
+# never sees the schema, so the answer has to be parsed out of the text (the
+# parser is forgiving, but structured output is the reliable path). Turn it off
+# for a local model that does not support tool calling.
+STRUCTURED_OUTPUT_ENABLED = _bool_env("STRUCTURED_OUTPUT", True)
+
+
+# ---------------------------------------------------------------------------
+# Reading the real pages (evidence)
+# ---------------------------------------------------------------------------
+# A search snippet is a two-line teaser, so an answer written from snippets
+# alone is written from something the model never really read. The `evidence`
+# node downloads the best sources and puts their text in the prompt instead:
+#
+#   EVIDENCE=off          -> answer from the search snippets (old behaviour)
+#   EVIDENCE_SOURCES=3    -> how many pages to read (the best ranked ones)
+#   EVIDENCE_CHARS=1500   -> how many characters to keep per page
+#
+# Only the top sources are read, each with a short timeout, and a page that
+# cannot be downloaded is skipped, so the node never slows the run down much.
+EVIDENCE_ENABLED = _bool_env("EVIDENCE", True)
+EVIDENCE_SOURCES = _int_env("EVIDENCE_SOURCES", 3)
+EVIDENCE_CHARS = _int_env("EVIDENCE_CHARS", 1500)
+
+
+# ---------------------------------------------------------------------------
 # Source quality ranking
 # ---------------------------------------------------------------------------
 # Every web source gets a quality score (0-100), from the most to the least
@@ -177,6 +232,20 @@ SOURCE_DOMAINS = {
         "futura-sciences.com",
         "science-et-vie.com",
         "lelivrescolaire.fr",
+        # Language learning, each one opened by hand before being listed. The
+        # point of adding them here is that without this a learner question
+        # lands on forum and blogspam domains scoring 20-25 instead of 60.
+        "learnenglish.britishcouncil.org",
+        "britishcouncil.org",
+        "dictionary.cambridge.org",
+        "cambridge.org",
+        "cambridgeenglish.org",
+        "oxfordlearnersdictionaries.com",
+        "youglish.com",
+        "voanews.com",
+        "esl-lab.com",
+        "englishprofile.org",
+        "coe.int",
     },
     "wikipedia": {
         "wikipedia.org",

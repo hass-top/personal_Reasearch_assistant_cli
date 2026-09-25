@@ -1,3 +1,4 @@
+import getpass
 import re
 from dataclasses import dataclass
 
@@ -10,8 +11,12 @@ from rich.table import Table
 
 import config
 from config import (
+    CLASSIFY_ENABLED,
     DEFAULT_MAX_QUERIES,
     DEFAULT_MAX_SOURCES,
+    EVIDENCE_CHARS,
+    EVIDENCE_ENABLED,
+    EVIDENCE_SOURCES,
     GROQ_API_KEY,
     GROQ_MODEL,
     OLLAMA_MODEL,
@@ -19,9 +24,16 @@ from config import (
     OPENAI_MODEL,
     PLANNER_ENABLED,
     SEARCH_PROVIDER,
+    STRUCTURED_OUTPUT_ENABLED,
     TAVILY_API_KEY,
 )
 from graph import create_graph
+from observability import (
+    TRACE_VERBOSE,
+    RunReport,
+    end_run,
+    start_run,
+)
 from search.ranking import (
     average_score,
     ranking_enabled,
@@ -56,9 +68,14 @@ def parse_menu_key(key: str) -> str:
     if is_quit_like(key):
         return "quit"
 
+    # CR/LF (Enter) means "default action"; strip() would eat them, so
+    # they are compared against the raw key.
+    if key in {"\r", "\n"}:
+        return "research"
+
     cleaned = key.strip().lower()
 
-    if cleaned in {"1", "\r", "\n"}:
+    if cleaned == "1":
         return "research"
 
     if cleaned in {"2", "p"}:
@@ -108,14 +125,19 @@ def parse_on_off(answer: str) -> bool | None:
 
 
 def ask_key(label: str, api_key: str | None) -> str:
-    """Reuse a key taken from the environment, otherwise ask the user for it."""
+    """Reuse a key taken from the environment, otherwise ask the user for it.
+
+    ``Prompt.ask(password=True)`` is deliberately *not* used here. In password
+    mode rich reads the terminal through its own console file instead of
+    ``builtins.input``, which makes it impossible to drive from a test: a
+    patched ``builtins.input`` is never consulted and the prompt waits for a
+    real keystroke forever. ``getpass`` reads ``sys.stdin`` the ordinary way,
+    still hides the typing, and is mockable.
+    """
     if api_key:
         return api_key
 
-    return Prompt.ask(
-        f"[bold green]❯ {label}[/bold green]",
-        password=True,
-    )
+    return getpass.getpass(f"{label}: ").strip()
 
 
 def quality_cell(source: dict) -> str:
@@ -365,6 +387,143 @@ def parameters_menu(settings: Settings) -> bool:
             console.print("[dim]Unknown option - pick 1, 2, 3 or b.[/dim]")
 
 
+def clarification_panel(result: dict) -> Panel:
+    """The yellow panel shown when the graph stopped at the clarify node."""
+    return Panel(
+        Markdown(str(result.get("result") or "")),
+        title="[bold yellow]Clarification Needed[/bold yellow]",
+        border_style="yellow",
+    )
+
+
+def clarification_options(result: dict) -> list[str]:
+    """The readings the model proposed, cleaned and deduplicated."""
+    options: list[str] = []
+
+    for item in result.get("clarification_options") or []:
+        text = str(item).strip()
+        if text and text not in options:
+            options.append(text)
+
+    return options
+
+
+def print_labels(result: dict) -> None:
+    """Subject / Intent / Topic / Task line shown under a panel."""
+    labels = []
+    for key, label in (
+        ("subject", "Subject"),
+        ("intent", "Intent"),
+        ("topic", "Topic"),
+        ("task", "Task"),
+    ):
+        value = str(result.get(key) or "").strip()
+        if value:
+            labels.append(f"{label}: {escape(value)}")
+
+    if labels:
+        console.print("[dim]" + " · ".join(labels) + "[/dim]")
+
+
+def ask_clarification(options: list[str]) -> tuple[str, str | None]:
+    """Numbered menu for an ambiguous request.
+
+    Returns ``("pick", <chosen option>)``, ``("back", None)`` or
+    ``("quit", None)``.
+    """
+    console.print("[bold yellow]Which one do you mean?[/bold yellow]")
+
+    for number, option in enumerate(options, start=1):
+        console.print(f"[{number}]  {escape(option)}")
+
+    answer = Prompt.ask(
+        f"[bold green]❯ Pick an option[/bold green] "
+        f"[dim](1-{len(options)}, b = back, q or Ctrl+Q = quit)[/dim]",
+        default="b",
+    )
+
+    if is_quit_like(answer):
+        return "quit", None
+
+    cleaned = (answer or "").strip().lower()
+
+    if cleaned in {"b", "back", ""}:
+        return "back", None
+
+    if cleaned.isdigit() and 1 <= int(cleaned) <= len(options):
+        return "pick", options[int(cleaned) - 1]
+
+    console.print("[dim]Unknown option - pick a number or b.[/dim]")
+    return "back", None
+
+
+#: Human labels for the graph nodes, so the progress line reads as English
+#: rather than as internal node names.
+STAGE_LABELS = {
+    "understand": "Reading the question",
+    "clarify": "Asking a clarifying question",
+    "plan": "Planning search queries",
+    "search": "Searching the web",
+    "evidence": "Reading source pages",
+    "research": "Writing the answer",
+}
+
+
+def run_graph(app, question: str, model: str = ""):
+    """Run the graph, printing each stage as it starts and finishes.
+
+    ``app.invoke`` gave one opaque spinner for the whole run, so a slow stage
+    and a dead process looked identical. Streaming the graph's updates means
+    every node is announced before it runs, so the longest wait is always
+    visible and always named.
+    """
+    start_run(question=question, model=model)
+    final: dict = {}
+
+    try:
+        with console.status(
+            "[bold cyan]Researching...[/bold cyan]",
+            spinner="dots",
+        ):
+            for update in app.stream(
+                {"question": question},
+                stream_mode="updates",
+            ):
+                for node, patch in (update or {}).items():
+                    if not isinstance(patch, dict):
+                        continue
+
+                    final.update(patch)
+
+                    if TRACE_VERBOSE:
+                        label = STAGE_LABELS.get(node, node)
+                        console.print(
+                            f"  [dim]·[/dim] [cyan]{label}[/cyan] "
+                            f"[dim]({node})[/dim]"
+                        )
+    finally:
+        report = end_run()
+        print_trace(report)
+
+    return final
+
+
+def print_trace(report: RunReport | None) -> None:
+    """Print the per-stage timing table for a finished run."""
+    if report is None or not TRACE_VERBOSE or not report.stages:
+        return
+
+    console.print(
+        "\n[dim]Timings[/dim]  [dim](set TRACE_VERBOSE=off to hide)[/dim]"
+    )
+
+    for line in report.lines():
+        console.print(line)
+
+    console.print(f"  [dim]{report.summary()}[/dim]")
+    console.print()
+
+
 def run_research(settings: Settings) -> bool:
     """Ask one question and print the answer.
 
@@ -390,26 +549,62 @@ def run_research(settings: Settings) -> bool:
         search_api_key=settings.search_api_key,
         max_sources=settings.max_sources,
         planner=settings.planner,
+        classify=CLASSIFY_ENABLED,
         max_queries=DEFAULT_MAX_QUERIES,
+        structured_output=STRUCTURED_OUTPUT_ENABLED,
+        evidence=EVIDENCE_ENABLED,
+        evidence_sources=EVIDENCE_SOURCES,
+        evidence_chars=EVIDENCE_CHARS,
     )
 
-    with console.status(
-        "[bold cyan]Researching...[/bold cyan]",
-        spinner="dots",
-    ):
-        result = app.invoke({
-            "question": question,
-        })
+    result = run_graph(app, question, model=settings.model)
 
     console.print()
 
+    if bool(result.get("ambiguous")):
+        # The graph stopped at the clarify node: nothing was searched yet.
+        console.print(clarification_panel(result))
+        print_labels(result)
+
+        options = clarification_options(result)
+        action, choice = ("back", None)
+
+        if options:
+            action, choice = ask_clarification(options)
+
+        if action == "quit":
+            return True
+
+        if action != "pick":
+            # Open question without readings (or the user went back):
+            # retype the request with more detail from the main menu.
+            return False
+
+        # One clarification round: re-invoke the graph with the chosen
+        # reading (every option is a self-contained restatement).
+        result = run_graph(app, choice, model=settings.model)
+
+        console.print()
+
+        if bool(result.get("ambiguous")):
+            # Still ambiguous: show the new question, but only one round
+            # is allowed so the CLI can never loop forever.
+            console.print(clarification_panel(result))
+            print_labels(result)
+            return False
+
+    # Streaming returns only the fields each node changed, so read the answer
+    # defensively: a node that never ran leaves its key absent.
+    answer = str(result.get("result") or "")
+
     console.print(
         Panel(
-            Markdown(result["result"]),
+            Markdown(answer),
             title="[bold green]Research Result[/bold green]",
             border_style="green",
         )
     )
+    print_labels(result)
 
     queries = result.get("queries") or []
     sources = result.get("sources") or []
@@ -423,7 +618,7 @@ def run_research(settings: Settings) -> bool:
         )
 
     if sources:
-        print_sources(sources, result["result"])
+        print_sources(sources, answer)
     else:
         console.print(
             "[bold yellow]⚠ No web sources found - the answer uses the "

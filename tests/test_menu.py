@@ -29,6 +29,23 @@ GRAPH_RESULT = {
 }
 
 
+def make_streaming_app(result):
+    """A stand-in for the compiled graph, driven through ``app.stream``.
+
+    ``run_graph`` consumes ``app.stream(..., stream_mode="updates")`` and
+    merges every node's patch into one final dict. A single update carrying
+    the whole result reproduces that exactly: the accumulated ``final`` is the
+    last node's full state, which is what the real graph ends on.
+
+    Built this way rather than as a bare Mock because an unconfigured Mock
+    returns a Mock, not an iterable, and fails deep inside the streaming loop
+    with a message that points nowhere near the test that caused it.
+    """
+    app = mock.Mock()
+    app.stream.return_value = [{"research": result}]
+    return app
+
+
 class QuitTests(unittest.TestCase):
     """q / quit / exit and the Ctrl+Q control character must quit."""
 
@@ -118,9 +135,16 @@ class ParameterTests(unittest.TestCase):
     def test_choose_model_switches_provider_and_key(self):
         settings = Settings()
 
+        # Two different input paths have to be stubbed. The numbered prompts go
+        # through rich's Prompt, which calls builtins.input. The API key does
+        # not: ask_key() uses getpass, which reads the terminal device directly
+        # and therefore ignores a patched builtins.input and blocks forever.
+        # Patching the module attribute is the only way to drive it.
         with mock.patch.object(main, "GROQ_API_KEY", None), mock.patch(
             "builtins.input",
-            side_effect=["3", "groq-model", "secret"],
+            side_effect=["3", "groq-model"],
+        ), mock.patch.object(
+            main.getpass, "getpass", return_value="secret"
         ):
             main.choose_model(settings)
 
@@ -133,12 +157,26 @@ class ParameterTests(unittest.TestCase):
 
         with mock.patch.object(main, "TAVILY_API_KEY", None), mock.patch(
             "builtins.input",
-            side_effect=["2", "tvly-key"],
+            side_effect=["2"],
+        ), mock.patch.object(
+            main.getpass, "getpass", return_value="tvly-key"
         ):
             main.choose_search(settings)
 
         self.assertEqual(settings.search_provider, "tavily")
         self.assertEqual(settings.search_api_key, "tvly-key")
+
+    def test_ask_key_reuses_the_environment_key_without_prompting(self):
+        """A key already in the environment must never be asked for again."""
+        with mock.patch.object(main.getpass, "getpass") as prompt:
+            self.assertEqual(main.ask_key("API key", "from-env"), "from-env")
+
+        prompt.assert_not_called()
+
+    def test_ask_key_strips_whitespace(self):
+        """A pasted key with a stray newline should still authenticate."""
+        with mock.patch.object(main.getpass, "getpass", return_value="  sk-123  \n"):
+            self.assertEqual(main.ask_key("API key", None), "sk-123")
 
     def test_research_options_change_thresholds(self):
         settings = Settings()
@@ -167,8 +205,7 @@ class MenuFlowTests(unittest.TestCase):
         app = None
 
         if graph_result is not None:
-            app = mock.Mock()
-            app.invoke.return_value = graph_result
+            app = make_streaming_app(graph_result)
 
         with mock.patch.object(main, "msvcrt", None), mock.patch.object(
             main, "console", mock.MagicMock()
@@ -194,7 +231,10 @@ class MenuFlowTests(unittest.TestCase):
             graph_result=GRAPH_RESULT,
         )
 
-        app.invoke.assert_called_once_with({"question": "why is the sky blue"})
+        app.stream.assert_called_once_with(
+            {"question": "why is the sky blue"},
+            stream_mode="updates",
+        )
 
     def test_ctrl_q_quits_from_the_main_menu(self):
         self.run_main(["1", "1", "\x11"])
