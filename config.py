@@ -1,4 +1,6 @@
+import json
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -112,8 +114,9 @@ EVIDENCE_CHARS = _int_env("EVIDENCE_CHARS", 1500)
 #   Reddit / forums .........................  25
 #   unrecognised domain .....................  20
 #
-# `search/ranking.py` turns a URL into a score; the tables below are the only
-# thing you normally need to edit to make the ranking smarter. A domain matches
+# `search/ranking.py` turns a URL into a score; the scores below and the
+# domain lists in `data/source_domains.json` are the only two things you
+# normally need to edit to make the ranking smarter. A domain matches
 # when it is listed or when it is a sub-domain of a listed one
 # (fr.wikipedia.org -> wikipedia.org); when several entries match, the most
 # specific one wins (pubmed.ncbi.nlm.nih.gov stays a paper even though nih.gov
@@ -144,157 +147,111 @@ SOURCE_TIER_SHORT_LABELS = {
     "unknown": "unrecognised",
 }
 
-# Domains per tier: add your own domains here.
-SOURCE_DOMAINS = {
-    "government": {
-        "nasa.gov",
-        "noaa.gov",
-        "usgs.gov",
-        "nist.gov",
-        "cdc.gov",
-        "nih.gov",
-        "nsf.gov",
-        "epa.gov",
-        "fda.gov",
-        "who.int",
-        "unicef.org",
-        "unesco.org",
-        "europa.eu",
-        "santepubliquefrance.fr",
-        "insee.fr",
-    },
-    "university": {
-        "cnrs.fr",
-        "inserm.fr",
-        "inria.fr",
-        "pasteur.fr",
-        "institutpasteur.fr",
-        "cea.fr",
-        "ird.fr",
-        "onera.fr",
-        "cern.ch",
-        "home.cern",
-        "esa.int",
-        "ipcc.ch",
-        "mpg.de",
-        "helmholtz.de",
-        "healthychildren.org",
-    },
-    "scientific_paper": {
-        "arxiv.org",
-        "biorxiv.org",
-        "medrxiv.org",
-        "hal.science",
-        "pubmed.ncbi.nlm.nih.gov",
-        "ncbi.nlm.nih.gov",
-        "doi.org",
-        "nature.com",
-        "science.org",
-        "sciencedirect.com",
-        "springer.com",
-        "ieee.org",
-        "acm.org",
-        "plos.org",
-        "mdpi.com",
-        "frontiersin.org",
-        "jstor.org",
-        "scielo.org",
-        "semanticscholar.org",
-        "researchgate.net",
-        "tandfonline.com",
-        "wiley.com",
-        "bmj.com",
-        "thelancet.com",
-        "cell.com",
-        "acs.org",
-        "iop.org",
-        "oup.com",
-    },
-    "educational": {
-        "khanacademy.org",
-        "britannica.com",
-        "nationalgeographic.com",
-        "natgeokids.com",
-        "openstax.org",
-        "ck12.org",
-        "coursera.org",
-        "edx.org",
-        "fun-mooc.fr",
-        "openclassrooms.com",
-        "larousse.fr",
-        "universalis.fr",
-        "w3schools.com",
-        "bbc.co.uk",
-        "pbs.org",
-        "pbslearningmedia.org",
-        "kidshealth.org",
-        "pourlascience.fr",
-        "futura-sciences.com",
-        "science-et-vie.com",
-        "lelivrescolaire.fr",
-        # Language learning, each one opened by hand before being listed. The
-        # point of adding them here is that without this a learner question
-        # lands on forum and blogspam domains scoring 20-25 instead of 60.
-        "learnenglish.britishcouncil.org",
-        "britishcouncil.org",
-        "dictionary.cambridge.org",
-        "cambridge.org",
-        "cambridgeenglish.org",
-        "oxfordlearnersdictionaries.com",
-        "youglish.com",
-        "voanews.com",
-        "esl-lab.com",
-        "englishprofile.org",
-        "coe.int",
-    },
-    "wikipedia": {
-        "wikipedia.org",
-        "wikimedia.org",
-        "wiktionary.org",
-        "wikibooks.org",
-        "wikisource.org",
-        "wikiversity.org",
-        "wikinews.org",
-        "wikiquote.org",
-        "wikidata.org",
-        "wikiwand.com",
-    },
-    "forum": {
-        "reddit.com",
-        "quora.com",
-        "stackexchange.com",
-        "stackoverflow.com",
-        "askubuntu.com",
-        "superuser.com",
-        "serverfault.com",
-        "answers.yahoo.com",
-        "wikihow.com",
-        "facebook.com",
-        "instagram.com",
-        "twitter.com",
-        "x.com",
-        "tiktok.com",
-        "youtube.com",
-        "youtu.be",
-        "dailymotion.com",
-        "vimeo.com",
-        "twitch.tv",
-        "linkedin.com",
-        "pinterest.com",
-        "tumblr.com",
-        "discord.com",
-        "t.me",
-        "medium.com",
-        "blogspot.com",
-        "wordpress.com",
-        "over-blog.com",
-        "wixsite.com",
-        "weebly.com",
-        "forumactif.com",
-        "github.com",
-        "gitlab.com",
-    },
-}
+# ---------------------------------------------------------------------------
+# Source domains
+# ---------------------------------------------------------------------------
+# The domain tables live in `data/source_domains.json` rather than here: they
+# are the one part of this file you are expected to edit often, and keeping
+# them out means this module stays readable as code. `data/README.md` has the
+# format and the reasoning behind the language-learning entries.
+#
+# This list only covers the domains worth listing by hand. Anything else falls
+# back on the extension heuristics in `ranking.py` (.gov, .edu, .ac.uk, ...).
+
+SOURCE_DOMAINS_FILE = os.getenv(
+    "SOURCE_DOMAINS_FILE",
+    str(Path(__file__).with_name("data") / "source_domains.json"),
+)
+
+#: Entries look like "a scheme" or "a host with a port", not a bare hostname.
+_DOMAIN_ERRORS = (
+    ("://", "a scheme, e.g. https://"),
+    ("/", "a path or a trailing slash"),
+    (":", "a port"),
+)
+
+
+def _load_source_domains(path: str) -> dict[str, tuple[str, ...]]:
+    """Read the per-tier domain lists, or explain precisely what is wrong.
+
+    A typo here is invisible at runtime: the domain just stops matching and
+    scores 20 as "unrecognised", with nothing to say why. So the list is
+    checked once, on load, and a bad entry is an error rather than a silent
+    downgrade.
+    """
+    with open(path, encoding="utf-8") as handle:
+        try:
+            raw = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path} is not valid JSON: {exc}") from None
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: expected an object of tier -> domains")
+
+    known = {name for name, _, _ in SOURCE_TIERS}
+    unknown = sorted(set(raw) - known)
+    if unknown:
+        raise ValueError(
+            f"{path}: unknown tier(s) {', '.join(unknown)}; "
+            f"expected one of {', '.join(sorted(known))}"
+        )
+
+    domains: dict[str, tuple[str, ...]] = {}
+    seen: dict[str, str] = {}
+
+    for tier, entries in raw.items():
+        if not isinstance(entries, list):
+            raise ValueError(f"{path}: '{tier}' must be a list of domains")
+
+        cleaned: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, str):
+                raise ValueError(f"{path}: '{tier}' holds a non-string entry")
+
+            domain = entry.strip()
+            if not domain:
+                raise ValueError(f"{path}: '{tier}' holds an empty domain")
+
+            for needle, reason in _DOMAIN_ERRORS:
+                if needle in domain:
+                    raise ValueError(
+                        f"{path}: '{domain}' looks like a URL, not a bare "
+                        f"hostname - it has {reason}"
+                    )
+
+            if domain.startswith("www."):
+                raise ValueError(
+                    f"{path}: '{domain}' should not start with 'www.'"
+                )
+
+            if domain != domain.lower():
+                raise ValueError(
+                    f"{path}: '{domain}' should be lower case, like the URLs"
+                )
+
+            if domain.endswith("."):
+                raise ValueError(
+                    f"{path}: '{domain}' should not end with a dot"
+                )
+
+            previous = seen.get(domain)
+            if previous is not None and previous != tier:
+                raise ValueError(
+                    f"{path}: '{domain}' is listed under both '{previous}' and "
+                    f"'{tier}'; it can only score once"
+                )
+
+            seen[domain] = tier
+
+            if domain not in cleaned:
+                cleaned.append(domain)
+
+        domains[tier] = tuple(cleaned)
+
+    return domains
+
+
+SOURCE_DOMAINS = _load_source_domains(SOURCE_DOMAINS_FILE)
 
 # Ranking switch and citation threshold:
 #   SOURCE_RANKING=off  -> sources keep their search order, no quality column

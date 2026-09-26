@@ -10,8 +10,9 @@ Sources are ranked from the most to the least reliable:
     Reddit / forums .........................  25
     unrecognised domain .....................  20
 
-The tiers, their scores and the domain tables live in `config.py`; this module
-only holds the logic. Nothing here touches the network.
+The tiers and their scores live in `config.py`; the domain tables they are
+matched against live in `data/source_domains.json`. This module only holds the
+logic. Nothing here touches the network.
 """
 
 from urllib.parse import urlsplit
@@ -36,7 +37,7 @@ RANKING_OFF_LABEL = "not ranked"
 # Best tier first: used to break ties when several listed domains match.
 _TIER_ORDER = tuple(name for name, _, _ in SOURCE_TIERS)
 
-# Extension labels used when a domain is not listed in config.SOURCE_DOMAINS.
+# Extension labels used when a domain is not in data/source_domains.json.
 _GOVERNMENT_LABELS = frozenset({"gov", "gouv", "gob", "governo", "mil"})
 _UNIVERSITY_LABELS = frozenset({"edu", "ac"})
 _UNIVERSITY_PREFIXES = ("univ", "universit")

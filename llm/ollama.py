@@ -132,7 +132,3 @@ class OllamaProvider:
                 timing.detail = f"{len(text)} chars"
 
             return message
-
-
-    def invoke(self , prompt: str):
-        return self.llm.invoke(prompt)
